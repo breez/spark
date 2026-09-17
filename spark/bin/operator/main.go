@@ -659,6 +659,11 @@ func main() {
 			// Don't run the task if the task specifies it should not be run in
 			// test environments and RunningLocally is set (eg. we are in a test environment)
 			if (!args.RunningLocally || scheduled.RunInTestEnv) && !scheduled.Disabled {
+				// A knob can shorten a task's execution interval (used to speed up
+				// integration tests). Unset in production, so the default interval stands.
+				if secs := knobsService.GetValue("spark.so.task."+scheduled.Name+".interval_seconds", 0); secs > 0 {
+					scheduled.ExecutionInterval = time.Duration(secs * float64(time.Second))
+				}
 				err := scheduled.Schedule(scheduler, config, dbClient, ephemeralDbClient, knobsService)
 				if err != nil {
 					logger.Fatal("Failed to create job", zap.Error(err))
