@@ -24,12 +24,16 @@ func (h *SspRequestHandler) ReserveInstantStaticDepositUtxoSwap(ctx context.Cont
 	if err := h.enforceSspSendsTransfer(ctx, req.GetTransfer().GetOwnerIdentityPublicKey()); err != nil {
 		return nil, err
 	}
+	if replay, err := replayInstantReservation(ctx, h.config, req); replay != nil || err != nil {
+		return replay, err
+	}
 	return NewStaticDepositHandler(h.config).reserveInstantStaticDepositUtxoSwapConsensus(ctx, h.config, req)
 }
 
 // ClaimInstantStaticDepositUtxoSwap completes a reservation once its deposit has
 // confirmed: the operators co-sign the service provider's spend of the deposit and
-// send any secondary credit.
+// send any secondary credit. A retry of a completed claim returns the stored
+// signature, since completing the swap consumed the signing nonces.
 func (h *SspRequestHandler) ClaimInstantStaticDepositUtxoSwap(ctx context.Context, req *pbssp.ClaimInstantStaticDepositUtxoSwapRequest) (*pbssp.ClaimInstantStaticDepositUtxoSwapResponse, error) {
 	if req == nil {
 		return nil, sparkerrors.InvalidArgumentMissingField(fmt.Errorf("request is required"))
@@ -56,7 +60,7 @@ func (h *SspRequestHandler) ClaimInstantStaticDepositUtxoSwap(ctx context.Contex
 		Where(
 			entutxoswap.IDEQ(swapID),
 			entutxoswap.RequestTypeEQ(st.UtxoSwapRequestTypeInstant),
-			entutxoswap.StatusEQ(st.UtxoSwapStatusCreated),
+			entutxoswap.StatusIn(st.UtxoSwapStatusCreated, st.UtxoSwapStatusCompleted),
 		).
 		ForUpdate().
 		Only(ctx)
@@ -73,6 +77,9 @@ func (h *SspRequestHandler) ClaimInstantStaticDepositUtxoSwap(ctx context.Contex
 		return nil, err
 	}
 
+	if swap.Status == st.UtxoSwapStatusCompleted {
+		return completedInstantClaimResponse(ctx, swap)
+	}
 	hasSecondaryCredit := swap.SecondaryCreditAmountSats != nil && *swap.SecondaryCreditAmountSats > 0
 	if hasSecondaryCredit != (req.GetTransfer() != nil) {
 		return nil, sparkerrors.InvalidArgumentMalformedField(fmt.Errorf("a secondary transfer is required exactly when the reservation has a secondary credit"))
