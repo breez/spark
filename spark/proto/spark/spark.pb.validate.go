@@ -2567,6 +2567,8 @@ func (m *AddressedUtxo) validate(all bool) error {
 
 	// no validation rules for IsConfirmed
 
+	// no validation rules for AmountSats
+
 	if len(errors) > 0 {
 		return AddressedUtxoMultiError(errors)
 	}

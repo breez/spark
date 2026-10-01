@@ -1950,6 +1950,7 @@ func (o *DepositHandler) GetUtxosForIdentity(ctx context.Context, req *pb.GetUtx
 				Vout:    utxo.Vout,
 				Network: req.GetNetwork(),
 			},
+			AmountSats: utxo.Amount,
 		})
 	}
 

@@ -1826,7 +1826,7 @@ func TestGetUtxosForIdentity(t *testing.T) {
 				SetTxid(txid).
 				SetVout(vout).
 				SetBlockHeight(blockHeight).
-				SetAmount(1000).
+				SetAmount(1000 + uint64(vout)).
 				SetPkScript([]byte("script")).
 				SetDepositAddress(addr).
 				Save(ctx)
@@ -1955,6 +1955,38 @@ func TestGetUtxosForIdentity(t *testing.T) {
 		require.NotContains(t, actualTxids, string(env.pendingClaimedUtxo.Txid))
 		require.NotContains(t, actualTxids, string(env.oneConfUtxo.Txid))
 		require.NotContains(t, actualTxids, string(env.otherIdentityUtxo.Txid))
+	})
+
+	t.Run("reports each utxo's on-chain amount", func(t *testing.T) {
+		env := newTestEnv(t)
+		response, err := env.handler.GetUtxosForIdentity(env.ctx, &pb.GetUtxosForIdentityRequest{
+			IdentityPublicKey: env.ownerIdentityPubKey.Serialize(),
+			Network:           pb.Network_REGTEST,
+			IncludePending:    true,
+			Page: &pb.PageRequest{
+				PageSize: 10,
+			},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, response.GetUtxos())
+
+		amounts := make(map[string]uint64)
+		for _, utxo := range []*ent.Utxo{
+			env.confirmedUtxo,
+			env.claimedConfirmedUtxo,
+			env.cancelledSwapUtxo,
+			env.pendingUtxo,
+			env.pendingClaimedUtxo,
+			env.thresholdConfirmedUtxo,
+			env.oneConfUtxo,
+		} {
+			amounts[string(utxo.Txid)] = utxo.Amount
+		}
+		for _, utxo := range response.GetUtxos() {
+			want, ok := amounts[string(utxo.GetUtxo().GetTxid())]
+			require.True(t, ok, "unexpected utxo in response")
+			require.Equal(t, want, utxo.GetAmountSats())
+		}
 	})
 
 	t.Run("include_pending returns mixed utxos and marks confirmed status", func(t *testing.T) {
