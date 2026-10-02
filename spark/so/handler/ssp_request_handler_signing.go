@@ -7,9 +7,13 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/btcsuite/btcd/wire"
+	"github.com/lightsparkdev/spark/common"
 	"github.com/lightsparkdev/spark/common/keys"
 	pbfrost "github.com/lightsparkdev/spark/proto/frost"
+	pb "github.com/lightsparkdev/spark/proto/spark"
 	"github.com/lightsparkdev/spark/so"
+	"github.com/lightsparkdev/spark/so/ent"
 	sparkerrors "github.com/lightsparkdev/spark/so/errors"
 	"github.com/lightsparkdev/spark/so/frost"
 	"github.com/lightsparkdev/spark/so/helper"
@@ -101,4 +105,70 @@ func aggregateSspSignedJobs(ctx context.Context, config *so.Config, jobs []sspSi
 		signatures[i] = aggregated[strconv.Itoa(i)]
 	}
 	return signatures, nil
+}
+
+// validateStaticDepositSpendShare checks the service provider's share of the
+// signature of its spend of utxo. The claim entry points call it before any
+// operator prepares: the coordinator aggregates only after the participants
+// prepared, and a participant cannot undo every prepared claim.
+func validateStaticDepositSpendShare(ctx context.Context, config *so.Config, job *pb.UserSignedTxSigningJob, utxo *ent.Utxo) error {
+	depositAddress, err := utxo.QueryDepositAddress().Only(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to get utxo deposit address: %w", err)
+	}
+	signingKeyshare, err := depositAddress.QuerySigningKeyshare().Only(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get signing keyshare: %w", err)
+	}
+	verifyingKey := signingKeyshare.PublicKey.Add(depositAddress.OwnerSigningPubkey)
+	spendTxSighash, _, err := GetTxSigningInfo(ctx, utxo, job.GetRawTx())
+	if err != nil {
+		return fmt.Errorf("failed to get spend tx sighash: %w", err)
+	}
+
+	frostConn, err := config.NewFrostGRPCConnection()
+	if err != nil {
+		return fmt.Errorf("unable to connect to the signer: %w", err)
+	}
+	defer frostConn.Close()
+	_, err = pbfrost.NewFrostServiceClient(frostConn).ValidateSignatureShare(ctx, &pbfrost.ValidateSignatureShareRequest{
+		Message:         spendTxSighash.Serialize(),
+		SignatureShare:  job.GetUserSignature(),
+		Role:            pbfrost.SigningRole_USER,
+		VerifyingKey:    verifyingKey.Serialize(),
+		PublicShare:     depositAddress.OwnerSigningPubkey.Serialize(),
+		Commitments:     job.GetSigningCommitments().GetSigningCommitments(),
+		UserCommitments: job.GetSigningNonceCommitment(),
+	})
+	if err != nil {
+		return sparkerrors.FailedPreconditionBadSignature(fmt.Errorf("unable to validate spend_tx_signing_job.user_signature: %w", err))
+	}
+	return nil
+}
+
+// finishStaticDepositSpendSignature returns the signature of the service
+// provider's spend of utxo: the operators' shares aggregated with the service
+// provider's. It fails when the signed transaction does not spend utxo.
+func finishStaticDepositSpendSignature(ctx context.Context, config *so.Config, job *pb.UserSignedTxSigningJob, signingResult *helper.SigningResult, verifyingKey keys.Public, userPublicKey keys.Public, utxo *ent.Utxo) ([]byte, error) {
+	signatures, err := aggregateSspSignedJobs(ctx, config, []sspSignedJob{{
+		userJob:       job,
+		signingResult: signingResult,
+		verifyingKey:  verifyingKey,
+		userPublicKey: userPublicKey,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	signedTxBytes, err := common.UpdateTxWithSignature(job.GetRawTx(), 0, signatures[0])
+	if err != nil {
+		return nil, fmt.Errorf("unable to apply the spend tx signature: %w", err)
+	}
+	signedTx, err := common.TxFromRawTxBytes(signedTxBytes)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse the signed spend tx: %w", err)
+	}
+	if err := common.VerifySignatureSingleInput(signedTx, 0, wire.NewTxOut(int64(utxo.Amount), utxo.PkScript)); err != nil {
+		return nil, sparkerrors.FailedPreconditionBadSignature(fmt.Errorf("unable to verify the spend tx signature: %w", err))
+	}
+	return signatures[0], nil
 }
