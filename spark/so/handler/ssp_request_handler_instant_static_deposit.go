@@ -24,6 +24,9 @@ func (h *SspRequestHandler) ReserveInstantStaticDepositUtxoSwap(ctx context.Cont
 	if err := h.enforceSspSendsTransfer(ctx, req.GetTransfer().GetOwnerIdentityPublicKey()); err != nil {
 		return nil, err
 	}
+	if replay, err := replayInstantReservation(ctx, h.config, req); replay != nil || err != nil {
+		return replay, err
+	}
 	return NewStaticDepositHandler(h.config).reserveInstantStaticDepositUtxoSwapConsensus(ctx, h.config, req)
 }
 
